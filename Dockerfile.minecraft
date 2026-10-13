@@ -1,0 +1,12 @@
+FROM itzg/minecraft-server:latest
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libxi6 \
+        libx11-6 \
+        libxext6 \
+        libxrender1 \
+        libxtst6 \
+    && rm -rf /var/lib/apt/lists/*

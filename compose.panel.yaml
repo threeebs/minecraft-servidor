@@ -1,0 +1,41 @@
+
+# Sobreposição do compose.yaml existente.
+# Preserva o mundo atual.
+
+services:
+  minecraft:
+    environment:
+      ENABLE_RCON: "TRUE"
+      RCON_PASSWORD: "${MC_RCON_PASSWORD:?Configure MC_RCON_PASSWORD no .env}"
+
+  painel:
+    build: ./minecraft-painel/panel
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:25555:80"
+    environment:
+      PANEL_PASSWORD: "${PANEL_PASSWORD:?Configure PANEL_PASSWORD no .env}"
+      MC_RCON_PASSWORD: "${MC_RCON_PASSWORD:?Configure MC_RCON_PASSWORD no .env}"
+      MC_RCON_HOST: minecraft
+      MC_RCON_PORT: "25575"
+    volumes:
+      - ./data:/mc-data:ro
+      - ./minecraft-painel/backups:/backups
+      - ./minecraft-painel/jobs:/jobs
+    depends_on:
+      - minecraft
+    security_opt:
+      - no-new-privileges:true
+
+  restaurador:
+    image: docker:27-cli
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/worker/restore.sh"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/mc-data
+      - ./minecraft-painel/backups:/backups:ro
+      - ./minecraft-painel/jobs:/jobs
+      - ./minecraft-painel/worker:/worker:ro
+    security_opt:
+      - no-new-privileges:true

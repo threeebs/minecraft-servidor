@@ -1,0 +1,40 @@
+# Segredos
+.env
+.env.*
+!.env.example
+
+# Mundo / dados do Minecraft
+data/
+world/
+world_nether/
+world_the_end/
+
+# Backups e restores
+backups/
+backup/
+*.zip
+*.tar
+*.tar.gz
+
+# Logs
+logs/
+*.log
+
+# Runtime
+*.pid
+*.lock
+
+# Sistema/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporários
+tmp/
+cache/
+
+# Painel - dados gerados
+minecraft-painel/jobs/
+minecraft-painel/backups/
+data-before-fabric/
