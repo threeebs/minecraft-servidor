@@ -38,3 +38,7 @@ cache/
 minecraft-painel/jobs/
 minecraft-painel/backups/
 data-before-fabric/
+
+# Testes Python
+__pycache__/
+*.pyc

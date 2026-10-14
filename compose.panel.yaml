@@ -12,7 +12,8 @@ services:
     build: ./minecraft-painel/panel
     restart: unless-stopped
     ports:
-      - "0.0.0.0:25555:80"
+      # Acesso pelo localhost e pelos IPs da máquina na rede.
+      - "${PANEL_BIND_ADDRESS:-0.0.0.0}:${PANEL_PORT:-25555}:80"
     environment:
       PANEL_PASSWORD: "${PANEL_PASSWORD:?Configure PANEL_PASSWORD no .env}"
       MC_RCON_PASSWORD: "${MC_RCON_PASSWORD:?Configure MC_RCON_PASSWORD no .env}"

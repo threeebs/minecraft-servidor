@@ -16,6 +16,6 @@ RUN apt-get update \
        'ServerSignature Off' \
        >> /etc/apache2/conf-available/security.conf
 
-COPY index.php /var/www/html/index.php
+COPY index.php rcon.php console.js /var/www/html/
 
 RUN chown -R www-data:www-data /var/www/html
