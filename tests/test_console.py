@@ -84,12 +84,15 @@ class ConsoleTest(unittest.TestCase):
         cls.rcon.commands = []
         threading.Thread(target=cls.rcon.serve_forever, daemon=True).start()
         cls.temp = tempfile.TemporaryDirectory()
+        cls.jobs = Path(cls.temp.name) / 'jobs'
+        cls.jobs.mkdir()
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         cls.url = f"http://127.0.0.1:{port}/"
         env = dict(os.environ, PANEL_PASSWORD="test-panel-password-1234",
                    MC_RCON_PASSWORD="test-rcon-password", MC_RCON_HOST="127.0.0.1",
+                   PANEL_JOBS_DIRECTORY=str(cls.jobs),
                    MC_RCON_PORT=str(cls.rcon.server_address[1]))
         root = Path(__file__).resolve().parents[1] / "minecraft-painel/panel"
         cls.log = open(Path(cls.temp.name) / "php.log", "w")
@@ -115,6 +118,9 @@ class ConsoleTest(unittest.TestCase):
         cls.temp.cleanup()
 
     def setUp(self):
+        for file in self.jobs.iterdir():
+            if file.is_file():
+                file.unlink()
         self.cookies = http.cookiejar.CookieJar()
         self.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookies))
         self.token = self.csrf(self.request()[1])
@@ -202,6 +208,77 @@ class ConsoleTest(unittest.TestCase):
                                      "command": "time set day"})
         self.assertEqual(status, 200)
         self.assertIn("Executado: time set day", page)
+
+    def update_ready(self):
+        (self.jobs / 'update-worker.json').write_text(json.dumps({
+            'ready': True, 'heartbeat': int(time.time()), 'current': 'a' * 40}))
+
+    def test_update_request_is_fixed_and_duplicate_is_rejected(self):
+        self.update_ready()
+        before = len(self.rcon.commands)
+        fields = {'action': 'update', 'format': 'json', 'csrf': self.token,
+                  'command': 'stop', 'repository': 'attacker', 'branch': 'other'}
+        status, data = self.request(fields)
+        self.assertEqual(status, 202)
+        self.assertTrue(json.loads(data)['busy'])
+        task = json.loads((self.jobs / 'update.job').read_text())
+        self.assertEqual(set(task), {'id', 'requested_at'})
+        self.assertRegex(task['id'], r'^[a-f0-9]{32}$')
+        status, data = self.request(fields)
+        self.assertEqual(status, 409)
+        self.assertIn('pendente', json.loads(data)['error'])
+        self.assertEqual(len(self.rcon.commands), before)
+
+    def test_update_authentication_and_csrf(self):
+        self.update_ready()
+        fields = {'action': 'update', 'format': 'json', 'csrf': 'wrong'}
+        self.assertEqual(self.request(fields)[0], 403)
+        self.assertFalse((self.jobs / 'update.job').exists())
+        self.request({'action': 'logout', 'csrf': self.token})
+        self.assertEqual(self.request(fields)[0], 401)
+        self.assertFalse((self.jobs / 'update.job').exists())
+
+    def test_update_requires_fresh_worker_and_defers_maintenance(self):
+        fields = {'action': 'update', 'format': 'json', 'csrf': self.token}
+        self.assertEqual(self.request(fields)[0], 409)
+        self.update_ready()
+        worker = self.jobs / 'update-worker.json'
+        worker.write_text(json.dumps({'ready': True, 'heartbeat': 1}))
+        self.assertEqual(self.request(fields)[0], 409)
+        self.update_ready()
+        for name in ['restore-example.job', 'restore-example.working', 'backup-in-progress']:
+            path = self.jobs / name
+            path.touch()
+            self.assertEqual(self.request(fields)[0], 409)
+            path.unlink()
+        import fcntl
+        with (self.jobs / 'backup.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.request(fields)[0], 409)
+        self.assertFalse((self.jobs / 'update.job').exists())
+
+    def test_update_progress_endpoint_is_authenticated_and_does_not_call_rcon(self):
+        self.update_ready()
+        url = self.url + '?update_status=1'
+        before = len(self.rcon.commands)
+        with self.client.open(url) as response:
+            status = json.loads(response.read())
+        self.assertTrue(status['can_update'])
+        self.assertEqual(status['current'], 'a' * 40)
+        self.assertEqual(len(self.rcon.commands), before)
+        self.request({'action': 'logout', 'csrf': self.token})
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.client.open(url)
+        self.assertEqual(error.exception.code, 401)
+
+    @unittest.skipUnless(os.environ.get('RUN_BROWSER_TESTS') == '1', 'Ative RUN_BROWSER_TESTS=1 para Chromium.')
+    def test_browser_console_and_update(self):
+        self.update_ready()
+        script = Path(__file__).with_name('test_panel_browser.cjs')
+        result = subprocess.run(['node', str(script)],
+                                env=dict(os.environ, TEST_PANEL_URL=self.url, TEST_JOBS_DIRECTORY=str(self.jobs)),
+                                capture_output=True, text=True, timeout=40)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ RUN apt-get update \
        'ServerSignature Off' \
        >> /etc/apache2/conf-available/security.conf
 
-COPY index.php rcon.php console.js /var/www/html/
+COPY index.php rcon.php updates.php console.js updates.js /var/www/html/
 
-RUN chown -R www-data:www-data /var/www/html
+RUN mkdir -p /var/lib/php/sessions \
+    && chown -R www-data:www-data /var/www/html /var/lib/php/sessions \
+    && chmod 700 /var/lib/php/sessions \
+    && printf '%s\n' 'session.save_path=/var/lib/php/sessions' > /usr/local/etc/php/conf.d/panel-sessions.ini

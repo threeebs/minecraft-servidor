@@ -46,6 +46,19 @@ docker compose -f compose.yaml -f compose.panel.yaml up -d --build --no-deps pai
 
 Essa atualização do painel não exige reiniciar o Minecraft.
 
+### Atualizar pelo botão do painel
+
+O painel inclui **Baixar e aplicar atualizações**, com progresso e revisão
+instalada. Depois de incorporar a atualização à `main`, configure uma vez no Ubuntu:
+
+```bash
+sudo bash scripts/install-panel-updater.sh
+```
+
+Na primeira execução, o instalador pode solicitar que você cadastre a chave
+pública exibida como **Deploy key de leitura** do repositório. Repita o comando
+após cadastrá-la. Consulte [o guia de atualizações](docs/atualizacoes-pelo-painel.md).
+
 ## Terminal
 
 - Digite um comando e pressione **Enter** ou **Enviar comando**.
