@@ -10,7 +10,7 @@ Esta é uma **extensão** do seu projeto em `~/minecraft-server`, não uma subst
 - Durante a restauração, um **worker separado** para o container Minecraft, extrai o snapshot e reinicia o servidor. O painel **não possui** acesso ao socket Docker; apenas o worker interno possui esse acesso.
 - Antes da restauração, conserva o mundo mais recente em `data/.pre-restore-<id>` para recuperação emergencial.
 
-**Aviso de segurança:** o worker tem acesso privilegiado ao Docker do host. O painel deve permanecer restrito a `127.0.0.1:8088`, com senha longa; nunca publique diretamente a porta no roteador. Evite expor o painel via Tunnel sem Cloudflare Access (controle de identidade). O modo offline do Minecraft (TLauncher) permite falsificação de nicknames; não confunda senha do painel com autenticação dos jogadores.
+**Aviso de segurança:** o worker tem acesso privilegiado ao Docker do host. O painel escuta em `0.0.0.0:25555` para acesso local e pela rede, com senha longa. Mantenha a porta na rede de administração. Evite expor o painel via Tunnel sem Cloudflare Access (controle de identidade). O modo offline do Minecraft (TLauncher) permite falsificação de nicknames; não confunda senha do painel com autenticação dos jogadores.
 
 ## 1. Extrair sem substituir arquivos existentes
 
@@ -30,7 +30,7 @@ O ZIP não inclui `compose.yaml` nem `data/`: os seus permanecem intocados.
 ```bash
 cd ~/minecraft-server
 mkdir -p minecraft-painel/backups minecraft-painel/jobs
-sudo chown -R 33:33 minecraft-painel/backups minecraft-painel/jobs
+sudo chown 1000:1000 minecraft-painel/backups minecraft-painel/jobs
 sudo chmod 770 minecraft-painel/backups minecraft-painel/jobs
 ```
 
@@ -63,15 +63,17 @@ O `compose.panel.yaml` só é utilizado quando incluído com `-f`; para gerencia
 
 ## 4. Abrir o painel
 
-No navegador do próprio Ubuntu: `http://127.0.0.1:8088`
+No navegador do próprio Ubuntu: **http://localhost:25555**.
 
-No Windows (mesma LAN), crie um túnel SSH e mantenha o terminal aberto:
+No Windows ou celular da mesma rede: **http://IP_DO_UBUNTU:25555**.
+Use `hostname -I` no Ubuntu para descobrir os IPs disponíveis. Entre com `PANEL_PASSWORD`.
 
-```powershell
-ssh -L 8088:127.0.0.1:8088 mahal@192.168.15.5
-```
+O bind padrão é `0.0.0.0`, que escuta em todas as interfaces. Esse endereço não é a URL do navegador.
+Você pode ajustar `PANEL_BIND_ADDRESS` e `PANEL_PORT` no `.env`; os padrões são `0.0.0.0` e `25555`.
 
-Depois acesse **http://127.0.0.1:8088** no Windows e entre com `PANEL_PASSWORD`. Se a porta SSH do Ubuntu for diferente, ajuste o comando.
+O terminal aceita comandos Minecraft e mostra as respostas sem recarregar a página.
+O histórico da sessão guarda até 50 envios; use ↑ e ↓ para repetir comandos.
+Consulte [README.md](README.md) para exemplos e atualização apenas do painel.
 
 ## 5. Seu primeiro backup, antes de jogar
 
