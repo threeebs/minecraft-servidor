@@ -50,7 +50,7 @@
     input.value = '';
     try {
       const body = new URLSearchParams({action: 'command', format: 'json', csrf: form.elements.csrf.value, command});
-      const result = await fetch(form.action, {method: 'POST', body, credentials: 'same-origin', headers: {Accept: 'application/json'}});
+      const result = await fetch(new URL(form.getAttribute('action') || '/', document.baseURI), {method: 'POST', body, credentials: 'same-origin', headers: {Accept: 'application/json'}});
       const data = await result.json();
       append(command, data.response || data.error || '(Sem mensagem de retorno)', !result.ok);
       if (data.player_status !== undefined) document.querySelector('#player-status').textContent = data.player_status;
