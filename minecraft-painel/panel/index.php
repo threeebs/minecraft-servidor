@@ -34,6 +34,7 @@ function alert(string $msg, string $type='info'): void { $_SESSION['flash']=['ms
 function redirect(): never { header('Location: /', true, 303); exit; }
 function dirInit(): void { foreach (['/backups','/jobs'] as $dir) if (!is_dir($dir) || !is_writable($dir)) throw new RuntimeException("Diretório sem acesso de escrita: $dir"); }
 require __DIR__ . '/rcon.php';
+require __DIR__ . '/updates.php';
 function worlds(): array {
   $properties=@file_get_contents('/mc-data/server.properties') ?: '';
   preg_match('/^level-name\s*=\s*(.+)$/m', $properties, $m);
@@ -48,8 +49,8 @@ function worlds(): array {
 }
 function backup(): string {
   dirInit();
-  $lock=fopen('/jobs/backup.lock','c');
-  if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) throw new RuntimeException('Já existe um backup em andamento.');
+  $lock=maintenanceLock();
+  if (updatePending()) { releaseMaintenanceLock($lock); throw new RuntimeException('Atualização pendente. Aguarde antes de fazer backup.'); }
   if (glob('/jobs/restore-*.job') || glob('/jobs/restore-*.working')) throw new RuntimeException('Restauração pendente; não faça backup agora.');
   $rcon=new Rcon();
   $name='world-'.gmdate('Ymd-His').'-'.bin2hex(random_bytes(3));
@@ -84,7 +85,7 @@ function listBackups(): array {
 }
 if ($_SERVER['REQUEST_METHOD']==='POST') {
   $action=(string)($_POST['action']??'');
-  $json=($action==='command' && ($_POST['format']??'')==='json');
+  $json=(in_array($action,['command','update'],true) && ($_POST['format']??'')==='json');
   if ($json && !logged()) jsonResponse(['error'=>'Faça login novamente.'],401);
   assertCsrf();
   if ($action==='login') {
@@ -112,10 +113,17 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         if ($cmd==='list') $result['player_status']=$response;
         jsonResponse($result);
       }
+    } elseif ($action==='update') {
+      $result=requestUpdate();
+      if ($json) jsonResponse($result,202);
+      alert('Atualização solicitada. Acompanhe o progresso no painel.','ok');
     } elseif ($action==='backup') {
       $file=backup(); alert('Snapshot criado: '.$file,'ok');
     } elseif ($action==='restore') {
       dirInit();
+      $lock=maintenanceLock();
+      try {
+      if (updatePending()) throw new RuntimeException('Atualização pendente. Aguarde antes de restaurar.');
       $file=(string)($_POST['file']??'');
       if (!preg_match('/^world-\d{8}-\d{6}-[a-f0-9]{6}\.tar\.gz$/D',$file) || !is_file('/backups/'.$file) || !is_file('/backups/'.$file.'.sha256') || !is_file('/backups/'.$file.'.roots')) throw new RuntimeException('Backup inválido.');
       if (($_POST['confirm']??'')!=='RESTAURAR') throw new RuntimeException('Confirmação inválida.');
@@ -124,13 +132,20 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
       $temp='/jobs/'.$job.'.tmp';
       if (file_put_contents($temp,$file."\n",LOCK_EX)===false || !rename($temp,'/jobs/'.$job.'.job')) throw new RuntimeException('Não foi possível enfileirar a restauração.');
       alert('Restauração solicitada. O Minecraft será parado e reiniciado automaticamente. Atualize a página para acompanhar.','ok');
+      } finally { releaseMaintenanceLock($lock); }
     } else throw new RuntimeException('Ação desconhecida.');
   } catch (Throwable $ex) {
     if ($action==='command' && isset($cmd) && $cmd!=='') consoleEntry($cmd,$ex->getMessage(),true);
-    if ($json) jsonResponse(['error'=>$ex->getMessage()], $ex instanceof InvalidArgumentException ? 422 : 502);
+    if ($json) jsonResponse(['error'=>$ex->getMessage()], $ex instanceof InvalidArgumentException ? 422 : ($action==='update' ? 409 : 502));
     alert($ex->getMessage(),'error');
   }
   redirect();
+}
+if (isset($_GET['update_status'])) {
+  if (!logged()) jsonResponse(['error'=>'Faça login novamente.'],401);
+  $result=updateStatus();
+  session_write_close();
+  jsonResponse($result);
 }
 if (isset($_GET['download'])) {
   if (!logged()) { http_response_code(401); exit('Faça login.'); }
@@ -144,6 +159,7 @@ $pending=(glob('/jobs/restore-*.job')?:[]) || (glob('/jobs/restore-*.working')?:
 $status=is_file('/jobs/latest.status')?trim((string)file_get_contents('/jobs/latest.status')):'Nenhuma restauração executada.';
 try { $playerStatus=logged()?(new Rcon())->command('list'):''; } catch(Throwable $e) { $playerStatus='Minecraft/RCON indisponível: '.$e->getMessage(); }
 $backups=logged()?listBackups():[];
+$update=logged()?updateStatus():[];
 ?><!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mahal • Minecraft Admin</title><?php if ($pending): ?><meta http-equiv="refresh" content="6"><?php endif; ?>
 <style>
@@ -169,7 +185,19 @@ $backups=logged()?listBackups():[];
   <div class="console-footer"><span id="console-state" role="status">Pronto para enviar</span><span id="console-help">Enter envia · ↑ ↓ navega pelo histórico</span></div>
   <noscript><p class="muted">Sem JavaScript, o comando é enviado e a página é recarregada.</p></noscript>
 </section>
+<section class="card wide" aria-labelledby="update-title">
+<h2 id="update-title">Atualizações do servidor</h2>
+<p>Baixe e aplique a versão publicada na <strong>main</strong>. Os serviços alterados podem reiniciar durante a atualização.</p>
+<form method="post" action="/" id="update-form" data-busy="<?=($update['busy']?'1':'0')?>">
+<input type="hidden" name="csrf" value="<?=e(csrf())?>"><input type="hidden" name="action" value="update">
+<button <?=($update['can_update']?'':'disabled')?>><?=($update['busy']?'Atualização em andamento…':'Baixar e aplicar atualizações')?></button>
+</form>
+<p id="update-message" role="status"><?=e($update['message'])?></p>
+<p id="update-revision" class="muted"><?=($update['current']?'Versão instalada: '.e(substr($update['current'],0,12)):'')?></p>
+<pre id="update-log" style="white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.6 ui-monospace,monospace"><?php foreach($update['events'] as $event): ?><?=e($event['time'].' · '.$event['message'])."\n"?><?php endforeach; ?></pre>
+<noscript><p class="muted">Atualize a página para acompanhar o progresso.</p></noscript>
+</section>
 <section class="card wide"><h2>Backup do mundo agora</h2><p>O botão pausa gravações, executa <code>save-all flush</code>, compacta os mundos (inventários incluídos) e reativa gravações. O servidor continua online durante o backup.</p><form method="post"><input type="hidden" name="csrf" value="<?=e(csrf())?>"><input type="hidden" name="action" value="backup"><button>⬇ Criar snapshot agora</button></form><p class="muted">Reserve espaço no disco: os snapshots são mantidos até você removê-los manualmente.</p></section>
 <section class="card wide dangerzone"><h2>Voltar a um snapshot</h2><p>Ao restaurar, todos os jogadores serão desconectados. O Minecraft será parado; os dados atuais serão movidos para uma pasta de segurança; o snapshot escolhido será restaurado e o Minecraft iniciado novamente. Todo progresso posterior àquele snapshot será perdido.</p><p><b>Última restauração:</b> <?=e($status)?></p><?php if($pending): ?><p class="badge">Restauração em andamento ou aguardando... Atualização automática.</p><?php endif; ?>
 <?php if(!$backups): ?><p class="muted">Nenhum snapshot ainda. Faça o primeiro backup antes de jogar.</p><?php endif; ?>
-<?php foreach($backups as $path): $file=basename($path); ?><div class="item"><div><strong><?=e($file)?></strong><br><small><?=date('d/m/Y H:i:s',filemtime($path))?> • <?=number_format(filesize($path)/1048576,1,',','.')?> MB</small></div><div class="actions"><a class="btn secondary" href="?download=<?=rawurlencode($file)?>">Baixar</a><form method="post" onsubmit="return confirm('ATENÇÃO: restaurar <?=e($file)?>? Progresso posterior será perdido, e o servidor será reiniciado.');"><input type="hidden" name="csrf" value="<?=e(csrf())?>"><input type="hidden" name="action" value="restore"><input type="hidden" name="file" value="<?=e($file)?>"><input type="hidden" name="confirm" value="RESTAURAR"><button class="danger" <?=($pending?'disabled':'')?>>Restaurar este backup</button></form></div></div><?php endforeach; ?></section></div><?php endif; ?></main><?php if(logged()): ?><script src="console.js?v=<?=filemtime(__DIR__.'/console.js')?>" defer></script><?php endif; ?></body></html>
+<?php foreach($backups as $path): $file=basename($path); ?><div class="item"><div><strong><?=e($file)?></strong><br><small><?=date('d/m/Y H:i:s',filemtime($path))?> • <?=number_format(filesize($path)/1048576,1,',','.')?> MB</small></div><div class="actions"><a class="btn secondary" href="?download=<?=rawurlencode($file)?>">Baixar</a><form method="post" onsubmit="return confirm('ATENÇÃO: restaurar <?=e($file)?>? Progresso posterior será perdido, e o servidor será reiniciado.');"><input type="hidden" name="csrf" value="<?=e(csrf())?>"><input type="hidden" name="action" value="restore"><input type="hidden" name="file" value="<?=e($file)?>"><input type="hidden" name="confirm" value="RESTAURAR"><button class="danger" <?=($pending?'disabled':'')?>>Restaurar este backup</button></form></div></div><?php endforeach; ?></section></div><?php endif; ?></main><?php if(logged()): ?><script src="console.js?v=<?=filemtime(__DIR__.'/console.js')?>" defer></script><script src="updates.js?v=<?=filemtime(__DIR__ . '/updates.js')?>" defer></script><?php endif; ?></body></html>

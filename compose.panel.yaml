@@ -20,6 +20,7 @@ services:
       MC_RCON_HOST: minecraft
       MC_RCON_PORT: "25575"
     volumes:
+      - painel-sessions:/var/lib/php/sessions
       - ./data:/mc-data:ro
       - ./minecraft-painel/backups:/backups
       - ./minecraft-painel/jobs:/jobs
@@ -40,3 +41,7 @@ services:
       - ./minecraft-painel/worker:/worker:ro
     security_opt:
       - no-new-privileges:true
+
+# Mantém o login ao reconstruir o painel pelo próprio botão.
+volumes:
+  painel-sessions:
