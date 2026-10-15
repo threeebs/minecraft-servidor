@@ -35,6 +35,100 @@ function redirect(): never { header('Location: /', true, 303); exit; }
 function dirInit(): void { foreach (['/backups','/jobs'] as $dir) if (!is_dir($dir) || !is_writable($dir)) throw new RuntimeException("Diretório sem acesso de escrita: $dir"); }
 require __DIR__ . '/rcon.php';
 require __DIR__ . '/updates.php';
+function minecraftCommandArg(string $value): string {
+  if (!preg_match('/^[A-Za-z0-9_.!\\-]{1,32}$/D', $value)) {
+    throw new InvalidArgumentException('Nome de jogador inválido.');
+  }
+  if (preg_match('/^[A-Za-z0-9_]+$/D', $value)) return $value;
+  return '"' . addcslashes($value, "\\\"") . '"';
+}
+function knownPlayers(): array {
+  $cacheFile='/mc-data/usercache.json';
+  $opsFile='/mc-data/ops.json';
+
+  $cache=[];
+  $ops=[];
+
+  if (is_file($cacheFile)) {
+    $decoded=json_decode((string)file_get_contents($cacheFile),true);
+    if (is_array($decoded)) $cache=$decoded;
+  }
+
+  if (is_file($opsFile)) {
+    $decoded=json_decode((string)file_get_contents($opsFile),true);
+    if (is_array($decoded)) $ops=$decoded;
+  }
+
+  $opsByUuid=[];
+  $opsByName=[];
+  foreach ($ops as $op) {
+    if (!is_array($op)) continue;
+    if (!empty($op['uuid'])) $opsByUuid[strtolower((string)$op['uuid'])]=$op;
+    if (!empty($op['name'])) $opsByName[strtolower((string)$op['name'])]=$op;
+  }
+
+  $online=[];
+  try {
+    $response=(new Rcon())->command('list');
+    if (preg_match('/online:\\s*(.*)$/i',$response,$match)) {
+      $names=trim($match[1]);
+      if ($names!=='') {
+        foreach (explode(',',$names) as $name) {
+          $name=trim($name);
+          if ($name!=='') $online[strtolower($name)]=true;
+        }
+      }
+    }
+  } catch (Throwable $e) {
+    // O histórico continua disponível se o RCON estiver temporariamente indisponível.
+  }
+
+  $playersByName=[];
+  foreach ($cache as $entry) {
+    if (!is_array($entry)) continue;
+    $name=trim((string)($entry['name']??''));
+    $uuid=trim((string)($entry['uuid']??''));
+    if ($name==='') continue;
+
+    $op=null;
+    if ($uuid!=='' && isset($opsByUuid[strtolower($uuid)])) {
+      $op=$opsByUuid[strtolower($uuid)];
+    } elseif (isset($opsByName[strtolower($name)])) {
+      $op=$opsByName[strtolower($name)];
+    }
+
+    $playersByName[strtolower($name)]=[
+      'name'=>$name,
+      'uuid'=>$uuid,
+      'online'=>isset($online[strtolower($name)]),
+      'op'=>$op!==null,
+      'level'=>$op!==null?(int)($op['level']??0):0,
+      'bypass'=>$op!==null && !empty($op['bypassesPlayerLimit']),
+    ];
+  }
+
+  // Também mostra operadores presentes no ops.json mesmo se o cache estiver incompleto.
+  foreach ($ops as $op) {
+    if (!is_array($op)) continue;
+    $name=trim((string)($op['name']??''));
+    if ($name==='' || isset($playersByName[strtolower($name)])) continue;
+    $playersByName[strtolower($name)]=[
+      'name'=>$name,
+      'uuid'=>trim((string)($op['uuid']??'')),
+      'online'=>isset($online[strtolower($name)]),
+      'op'=>true,
+      'level'=>(int)($op['level']??0),
+      'bypass'=>!empty($op['bypassesPlayerLimit']),
+    ];
+  }
+
+  $players=array_values($playersByName);
+  usort($players,function(array $a,array $b): int {
+    if ($a['online']!==$b['online']) return $a['online']?-1:1;
+    return strcasecmp($a['name'],$b['name']);
+  });
+  return $players;
+}
 function worlds(): array {
   $properties=@file_get_contents('/mc-data/server.properties') ?: '';
   preg_match('/^level-name\s*=\s*(.+)$/m', $properties, $m);
@@ -100,7 +194,24 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
   if (!logged()) { http_response_code(401); exit('Faça login.'); }
   if ($action==='logout') { $_SESSION=[]; session_destroy(); redirect(); }
   try {
-    if ($action==='command') {
+    if ($action==='player_permission') {
+      $player=trim((string)($_POST['player']??''));
+      $permission=(string)($_POST['permission']??'');
+      $arg=minecraftCommandArg($player);
+
+      if (!in_array($permission,['player','operator'],true)) {
+        throw new InvalidArgumentException('Permissão inválida.');
+      }
+
+      $rcon=new Rcon();
+      if ($permission==='operator') {
+        $response=$rcon->command('op '.$arg);
+        alert($player.' agora é operador.'.($response!==''?"\n".$response:''),'ok');
+      } else {
+        $response=$rcon->command('deop '.$arg);
+        alert($player.' agora é jogador comum.'.($response!==''?"\n".$response:''),'ok');
+      }
+    } elseif ($action==='command') {
       $raw=$_POST['command']??'';
       if (!is_string($raw) || strlen($raw)>256 || preg_match('/[\r\n\x00-\x1F\x7F]/',$raw)) throw new InvalidArgumentException('Use um comando de até 256 bytes, em uma única linha.');
       $cmd=ltrim(trim($raw),'/');
@@ -160,17 +271,65 @@ $status=is_file('/jobs/latest.status')?trim((string)file_get_contents('/jobs/lat
 try { $playerStatus=logged()?(new Rcon())->command('list'):''; } catch(Throwable $e) { $playerStatus='Minecraft/RCON indisponível: '.$e->getMessage(); }
 $backups=logged()?listBackups():[];
 $update=logged()?updateStatus():[];
+$players=logged()?knownPlayers():[];
 ?><!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mahal • Minecraft Admin</title><?php if ($pending): ?><meta http-equiv="refresh" content="6"><?php endif; ?>
 <style>
 :root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#e8ecf5;background:#0d111b}*{box-sizing:border-box}body{margin:0}main{max-width:1060px;margin:36px auto;padding:0 20px}.top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}h1{font-size:29px;margin:4px 0}h2{font-size:19px;margin:0 0 14px}.muted{color:#9caabd;font-size:14px}p{line-height:1.55}.badge{display:inline-block;background:#123826;color:#80e6af;border:1px solid #2e8658;padding:5px 9px;border-radius:999px;font-size:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}.wide{grid-column:1/-1}.card{background:#171e2e;border:1px solid #2c374e;border-radius:16px;padding:22px}.flash{padding:14px 18px;border-radius:10px;background:#173b30;color:#b4f8cf;white-space:pre-wrap;margin:20px 0}.flash.error{background:#482226;color:#ffbec1}button,.btn{font:inherit;background:#3cb87b;color:#071b13;border:0;padding:11px 16px;border-radius:9px;font-weight:700;cursor:pointer}button.secondary,.btn.secondary{background:#29354a;color:#e8ecf5}button.danger{background:#d85654;color:white}input{font:inherit;background:#0c1321;color:white;border:1px solid #4b5e77;border-radius:8px;padding:11px;width:100%}form.inline{display:flex;gap:9px;align-items:center}form.inline input{flex:1}.item{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:13px 0;border-top:1px solid #334157;flex-wrap:wrap}.item:first-child{border-top:0}.actions{display:flex;gap:9px;flex-wrap:wrap}small{color:#aab4c3}.dangerzone{border-color:#6f424a}code{background:#0b1322;padding:3px 5px;border-radius:5px}@media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}h1{font-size:24px}form.inline{flex-wrap:wrap}}a{color:#8fe4b3}
 
 .card{min-width:0}.console-card{padding:22px}.console-card h2{margin-bottom:0}.console-card .muted{margin:6px 0 16px}.console-output{height:340px;overflow:auto;background:#080e16;border:1px solid #334157;border-radius:10px;margin:4px 0 16px;padding:16px;font:15px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}.console-output:empty:before{content:'O console está pronto. Envie um comando abaixo.';color:#9caabd}.console-entry{margin-bottom:18px}.console-prompt{color:#80e6af}.console-response{color:#d8e2f0}.console-error .console-response{color:#ffb9bf}.console-symbol{color:#80e6af;font-size:22px}#console-form input{min-width:180px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.console-footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#aab4c3;font-size:14px;margin-top:12px}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #8fe4b3;outline-offset:3px}@media(max-width:540px){main{padding:0 12px;margin:20px auto}.card{padding:18px}.console-output{height:300px;font-size:14px}#console-form button{width:100%}}
+
+.player-row{align-items:center}.player-info{min-width:0}.player-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:5px}.player-online{color:#80e6af;font-size:13px;font-weight:700}.player-offline{color:#8491a5;font-size:13px}.player-permission{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.permission{display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;font-size:13px;font-weight:700}.permission.operator{background:#123826;color:#80e6af;border:1px solid #2e8658}.permission.player{background:#242e40;color:#c6d0df;border:1px solid #3c4a61}.player-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:5px}.player-meta small{overflow-wrap:anywhere}@media(max-width:760px){.player-row{align-items:flex-start}.player-permission{width:100%;justify-content:space-between}}
 </style></head><body><main><div class="top"><div><span class="badge">MINECRAFT • ADMIN</span><h1>Servidor Mahal</h1><div class="muted">Painel local • RCON • Snapshots do mundo</div></div><?php if(logged()): ?><form method="post"><input type="hidden" name="csrf" value="<?=e(csrf())?>"><input type="hidden" name="action" value="logout"><button class="secondary">Sair</button></form><?php endif; ?></div>
 <?php if($flash): ?><div class="flash <?=($flash['type']==='error'?'error':'')?>"><?=e($flash['msg'])?></div><?php endif; ?>
 <?php if (!logged()): ?><section class="card" style="max-width:430px;margin:28px auto"><h2>Entrar no painel</h2><form method="post"><input type="hidden" name="csrf" value="<?=e(csrf())?>"><input type="hidden" name="action" value="login"><label>Senha de administrador</label><p><input name="password" type="password" minlength="16" autocomplete="current-password" required></p><button>Entrar</button></form></section>
 <?php else: ?><div class="grid"><section class="card"><h2>Estado do servidor</h2><p id="player-status"><?=e($playerStatus)?></p><small>Conexão pelo serviço Docker <code>minecraft:25575</code>. O RCON não está exposto na internet.</small></section>
 <section class="card"><h2>Comandos rápidos</h2><div class="actions"><?php foreach(['list'=>'Jogadores','time set day'=>'Dia','time set night'=>'Noite','weather clear'=>'Sem chuva','difficulty peaceful'=>'Pacífico','save-all flush'=>'Salvar mundo'] as $cmd=>$label): ?><form method="post" data-quick-command><input type="hidden" name="csrf" value="<?=e(csrf())?>"><input type="hidden" name="action" value="command"><input type="hidden" name="command" value="<?=e($cmd)?>"><button class="secondary" data-command><?=e($label)?></button></form><?php endforeach; ?></div></section>
+<section class="card wide" aria-labelledby="players-title">
+  <div class="top">
+    <div>
+      <h2 id="players-title">Jogadores e permissões</h2>
+      <p class="muted">Todos os jogadores já registrados pelo servidor. Jogadores online aparecem primeiro.</p>
+    </div>
+    <span class="badge"><?=count($players)?> jogadores</span>
+  </div>
+  <?php if(!$players): ?><p class="muted">Nenhum jogador encontrado no histórico do servidor.</p><?php endif; ?>
+  <?php foreach($players as $player): ?>
+    <div class="item player-row">
+      <div class="player-info">
+        <div class="player-name">
+          <strong><?=e($player['name'])?></strong>
+          <?php if($player['online']): ?><span class="player-online">● Online</span><?php else: ?><span class="player-offline">○ Offline</span><?php endif; ?>
+        </div>
+        <div class="player-meta">
+          <?php if($player['uuid']!==''): ?><small>UUID: <?=e($player['uuid'])?></small><?php endif; ?>
+          <?php if($player['op'] && $player['bypass']): ?><small>• ignora limite de jogadores</small><?php endif; ?>
+        </div>
+      </div>
+      <div class="player-permission">
+        <?php if($player['op']): ?>
+          <span class="permission operator">Operador · Nível <?=e((string)$player['level'])?></span>
+          <form method="post" onsubmit="return confirm('Retirar permissão de operador de <?=e($player['name'])?>?');">
+            <input type="hidden" name="csrf" value="<?=e(csrf())?>">
+            <input type="hidden" name="action" value="player_permission">
+            <input type="hidden" name="player" value="<?=e($player['name'])?>">
+            <input type="hidden" name="permission" value="player">
+            <button class="secondary">Tornar jogador</button>
+          </form>
+        <?php else: ?>
+          <span class="permission player">Jogador</span>
+          <form method="post">
+            <input type="hidden" name="csrf" value="<?=e(csrf())?>">
+            <input type="hidden" name="action" value="player_permission">
+            <input type="hidden" name="player" value="<?=e($player['name'])?>">
+            <input type="hidden" name="permission" value="operator">
+            <button>Tornar operador</button>
+          </form>
+        <?php endif; ?>
+      </div>
+    </div>
+  <?php endforeach; ?>
+</section>
 <section class="card wide console-card" aria-labelledby="console-title">
   <div class="top"><div><h2 id="console-title">Terminal do Minecraft</h2><p class="muted">Envie comandos e acompanhe as respostas do servidor.</p></div><button type="button" class="secondary" id="clear-console">Limpar tela</button></div>
   <div id="console-output" class="console-output" role="log" aria-label="Histórico de comandos" aria-live="polite" tabindex="0">
